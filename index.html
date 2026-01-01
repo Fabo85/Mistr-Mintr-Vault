@@ -108,5 +108,445 @@
                     <i class="fas fa-upload"></i>
                 </button>
                 <input type="file" id="importInput" accept=".json" onchange="handleImport(event)">
-                <button onclick="clearVault()" title="Purge Local Cache" class="p-4 border border-cyan-900/30 text-cyan-900 hover:text
+                <button onclick="clearVault()" title="Purge Local Cache" class="p-4 border border-cyan-900/30 text-cyan-900 hover:text-red-600 hover:border-red-600/50 transition-all">
+                    <i class="fas fa-trash-can"></i>
+                </button>
+            </div>
+        </div>
+
+        <div id="vaultGrid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6"></div>
+    </div>
+
+    <!-- HUD (Heads Up Display) -->
+    <div id="audioHUD" class="fixed bottom-8 left-1/2 -translate-x-1/2 hidden z-[100] bg-[#08080c]/95 border border-emerald-500/50 py-4 px-8 flex flex-col md:flex-row items-center gap-6 shadow-[0_0_50px_rgba(0,0,0,0.8)] backdrop-blur-2xl rounded-sm min-w-[320px] md:min-w-[750px]">
+        <div class="flex items-center gap-4 w-full md:w-auto">
+            <div id="hudPulse" class="w-2 h-2 bg-emerald-400 rounded-full"></div>
+            <div class="flex flex-col min-w-[140px]">
+                <span id="hudStatus" class="text-[10px] font-black uppercase tracking-widest text-emerald-400 leading-none">Cognitive Link</span>
+                <span id="hudTime" class="text-[9px] font-mono text-cyan-700 mt-1 tracking-tighter">00:00 / 00:00</span>
+            </div>
+        </div>
+        
+        <input type="range" id="hudSeek" min="0" max="100" value="0" class="flex-grow cursor-pointer w-full">
+
+        <div class="flex items-center gap-6">
+            <button id="hudPlayPause" class="text-emerald-400 hover:text-white transition-colors text-lg w-8" title="Toggle Playback"><i class="fas fa-play"></i></button>
+            <button id="hudStop" class="text-red-900 hover:text-red-500 transition-colors text-lg" title="Terminate Link"><i class="fas fa-power-off"></i></button>
+        </div>
+    </div>
+
+    <!-- MODAL (Create/Edit Node) -->
+    <div id="modalOverlay" class="fixed inset-0 bg-black/98 backdrop-blur-3xl hidden z-[100] flex items-center justify-center p-4">
+        <div class="w-full max-w-2xl bg-[#0d0d12] border border-emerald-500/20 p-8">
+            <h2 id="modalTitle" class="text-lg font-black text-emerald-400 mb-8 uppercase tracking-[0.2em]">Node Calibration</h2>
+            <div class="space-y-6">
+                <input type="hidden" id="editId">
+                <div class="grid grid-cols-2 gap-4">
+                    <input id="fragmentTitle" placeholder="Node Alias" class="bg-black border border-white/10 p-4 text-emerald-400 outline-none text-sm font-bold tracking-widest">
+                    <select id="fileType" class="bg-black border border-white/10 p-4 text-emerald-400 outline-none text-xs uppercase font-bold">
+                        <option value="text">Neural Text</option>
+                        <option value="audio">Audio Wave</option>
+                        <option value="link">Visual (YT)</option>
+                    </select>
+                </div>
+                <input id="fileUrl" placeholder="Source URL (Optional)" class="w-full bg-black border border-white/10 p-4 text-cyan-400 outline-none text-xs font-mono">
+                <textarea id="fragmentContent" rows="6" placeholder="Neural Payload Data..." class="w-full bg-black border border-white/10 p-4 text-cyan-100 font-mono text-xs outline-none resize-none"></textarea>
+                <div class="flex justify-end gap-6 pt-4">
+                    <button onclick="toggleModal(false)" class="text-[10px] text-cyan-900 uppercase font-black tracking-widest hover:text-white transition-colors">Discard</button>
+                    <button onclick="handleSave()" class="bg-emerald-600 text-black px-10 py-3 text-xs font-black uppercase shadow-lg shadow-emerald-900/20">Commit to Vault</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // --------------------
+        // STORAGE MANAGER
+        // --------------------
+        const StorageManager = {
+            KEY: 'EIDOLON_VAULT_DATA',
+            get: function() {
+                const data = localStorage.getItem(this.KEY);
+                return data ? JSON.parse(data) : [];
+            },
+            save: function(fragments) {
+                localStorage.setItem(this.KEY, JSON.stringify(fragments));
+            }
+        };
+
+        let fragments = StorageManager.get();
+
+        // --------------------
+        // MEDIA MANAGER
+        // --------------------
+        const MediaManager = {
+            currentId: null,
+            type: null,          
+            audio: null,
+            yt: null,
+            ttsWords: [],
+            ttsIndex: 0,
+            ttsPlaying: false,
+            ttsUtterance: null,
+            syncRaf: null,
+
+            dom: {
+                pulse: document.getElementById('hudPulse'),
+                playPause: document.getElementById('hudPlayPause'),
+                seek: document.getElementById('hudSeek'),
+                time: document.getElementById('hudTime'),
+                status: document.getElementById('hudStatus'),
+                container: document.getElementById('audioHUD')
+            },
+
+            init: function(item) {
+                if (!item) return;
+                this.stopAll();
+                this.currentId = item.id;
+                
+                const card = document.getElementById(`card-${item.id}`);
+                if (card) card.classList.add('reading-glow');
+                this.dom.container.classList.remove('hidden');
+
+                if (item.fileType === 'audio' && item.fileUrl) {
+                    this.type = 'audio';
+                    this.audio = card.querySelector('audio');
+                    this.audio.play().catch(() => {
+                        this.dom.status.innerText = 'AUDIO BLOCKED - TAP PLAY';
+                        this.updatePlayPauseIcon(false);
+                    });
+                    this.audio.ontimeupdate = () => this.syncHUD();
+                    this.audio.onended = () => this.stopAll();
+                    this.dom.status.innerText = 'Audio Waveform';
+                    this.updatePlayPauseIcon(true);
+                } else if (item.fileType === 'link' && item.fileUrl.includes('youtube')) {
+                    this.type = 'yt';
+                    const vidId = this.extractYTID(item.fileUrl);
+                    this.dom.status.innerText = 'Loading Visuals...';
+                    this.yt = new YT.Player(`yt-${item.id}`, {
+                        videoId: vidId,
+                        playerVars: { autoplay: 1, controls: 0, modestbranding: 1, enablejsapi: 1, rel: 0 },
+                        events: {
+                            onReady: () => {
+                                this.dom.status.innerText = 'Visual Stream';
+                                this.startSyncLoop();
+                                this.updatePlayPauseIcon(true);
+                            },
+                            onStateChange: (e) => {
+                                if (e.data === YT.PlayerState.ENDED) this.stopAll();
+                                this.updatePlayPauseIcon(e.data === YT.PlayerState.PLAYING);
+                            }
+                        }
+                    });
+                } else { 
+                    this.type = 'tts';
+                    this.dom.status.innerText = 'Neural Text Bridge';
+                    this.prepareTTSRender(item.id, item.content || "[EMPTY NODE]");
+                    this.runTTS(0);
+                }
+            },
+
+            prepareTTSRender: function(id, content) {
+                const el = document.getElementById(`content-${id}`);
+                if (!el) return;
+                this.ttsWords = content.split(/\s+/);
+                el.innerHTML = this.ttsWords.map((w, i) => `<span class="tts-word" id="word-${id}-${i}">${w}</span>`).join(' ');
+            },
+
+            runTTS: function(startIndex = 0) {
+                this.stopTTSOnly();
+                this.ttsIndex = startIndex;
+                this.ttsPlaying = true;
+                this.updatePlayPauseIcon(true);
+                this.speakNextWord();
+            },
+
+            speakNextWord: function() {
+                if (!this.ttsPlaying || this.ttsIndex >= this.ttsWords.length) {
+                    if (this.ttsIndex >= this.ttsWords.length) this.stopAll();
+                    return;
+                }
+                if (this.ttsUtterance) {
+                    this.ttsUtterance.onend = null;
+                }
+                this.ttsUtterance = new SpeechSynthesisUtterance(this.ttsWords[this.ttsIndex]);
+                this.ttsUtterance.rate = parseFloat(document.getElementById('rateSlider').value);
+                this.ttsUtterance.onend = () => {
+                    this.ttsIndex++;
+                    this.syncHUD();
+                    this.speakNextWord();
+                };
+                speechSynthesis.speak(this.ttsUtterance);
+                this.highlightTTSWord();
+            },
+
+            highlightTTSWord: function() {
+                const id = this.currentId;
+                const old = document.querySelector('.tts-active-word');
+                if (old) old.classList.remove('tts-active-word');
+                const current = document.getElementById(`word-${id}-${this.ttsIndex}`);
+                if (current) {
+                    current.classList.add('tts-active-word');
+                    current.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                }
+            },
+
+            stopTTSOnly: function() {
+                this.ttsPlaying = false;
+                speechSynthesis.cancel();
+            },
+
+            startSyncLoop: function() {
+                const update = () => {
+                    if (this.type !== 'yt' || !this.yt) return;
+                    this.syncHUD();
+                    this.syncRaf = requestAnimationFrame(update);
+                };
+                this.syncRaf = requestAnimationFrame(update);
+            },
+
+            syncHUD: function() {
+                let curr = 0, total = 0;
+                if (this.type === 'audio' && this.audio) {
+                    curr = this.audio.currentTime;
+                    total = this.audio.duration;
+                } else if (this.type === 'yt' && this.yt?.getDuration) {
+                    curr = this.yt.getCurrentTime();
+                    total = this.yt.getDuration();
+                } else if (this.type === 'tts') {
+                    curr = this.ttsIndex;
+                    total = this.ttsWords.length;
+                }
+
+                if (total) {
+                    const pct = (curr / total) * 100;
+                    this.dom.seek.value = pct;
+                    this.dom.time.innerText = (this.type === 'tts') 
+                        ? `${curr} / ${total} WORDS`
+                        : `${this.formatTime(curr)} / ${this.formatTime(total)}`;
+                }
+            },
+
+            togglePlayPause: function() {
+                if (this.type === 'tts') {
+                    if (speechSynthesis.speaking && !speechSynthesis.paused) {
+                        speechSynthesis.pause();
+                        this.ttsPlaying = false;
+                        this.updatePlayPauseIcon(false);
+                    } else if (speechSynthesis.paused) {
+                        speechSynthesis.resume();
+                        this.ttsPlaying = true;
+                        this.updatePlayPauseIcon(true);
+                    } else {
+                        this.runTTS(this.ttsIndex);
+                    }
+                } else if (this.type === 'audio' && this.audio) {
+                    if (this.audio.paused) { this.audio.play(); this.updatePlayPauseIcon(true); }
+                    else { this.audio.pause(); this.updatePlayPauseIcon(false); }
+                } else if (this.type === 'yt' && this.yt) {
+                    if (this.yt.getPlayerState() === YT.PlayerState.PLAYING) this.yt.pauseVideo();
+                    else this.yt.playVideo();
+                }
+            },
+
+            seek: function(val) {
+                const pct = val / 100;
+                if (this.type === 'audio' && this.audio) {
+                    this.audio.currentTime = (this.audio.duration || 0) * pct;
+                } else if (this.type === 'yt' && this.yt?.getDuration) {
+                    this.yt.seekTo(this.yt.getDuration() * pct, true);
+                } else if (this.type === 'tts') {
+                    this.runTTS(Math.floor(this.ttsWords.length * pct));
+                }
+            },
+
+            stopAll: function() {
+                cancelAnimationFrame(this.syncRaf);
+                this.stopTTSOnly();
+                if (this.audio) { this.audio.pause(); this.audio.currentTime = 0; this.audio = null; }
+                if (this.yt) { try { if(this.yt.destroy) this.yt.destroy(); } catch (e) {} this.yt = null; }
+                if (this.currentId) {
+                    const card = document.getElementById(`card-${this.currentId}`);
+                    if(card) card.classList.remove('reading-glow');
+                }
+                this.currentId = null;
+                this.type = null;
+                this.dom.container.classList.add('hidden');
+                renderVault();
+            },
+
+            updatePlayPauseIcon: function(playing) {
+                this.dom.playPause.innerHTML = `<i class="fas fa-${playing ? 'pause' : 'play'}"></i>`;
+                this.dom.pulse.classList.toggle('mint-pulse', playing);
+            },
+
+            formatTime: (s) => {
+                if (isNaN(s) || s < 0) return "00:00";
+                const m = Math.floor(s / 60);
+                const rs = Math.floor(s % 60);
+                return `${m.toString().padStart(2, '0')}:${rs.toString().padStart(2, '0')}`;
+            },
+            
+            extractYTID: (url) => {
+                const m = url.match(/^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|\&v=)([^#\&\?]*).*/);
+                return (m && m[2].length === 11) ? m[2] : null;
+            }
+        };
+
+        // --------------------
+        // UI CORE
+        // --------------------
+        window.renderVault = () => {
+            const grid = document.getElementById('vaultGrid');
+            const search = document.getElementById('searchInput').value.toLowerCase();
+            const filtered = fragments.filter(f => f.title.toLowerCase().includes(search));
+
+            grid.innerHTML = filtered.map(item => `
+                <div id="card-${item.id}" class="glass-card p-6 group flex flex-col h-full ${MediaManager.currentId === item.id ? 'reading-glow' : ''}">
+                    <div class="flex justify-between items-start mb-6">
+                        <div class="flex flex-col">
+                            <span class="text-[8px] text-emerald-900 font-black mb-1">NODE_ID: ${item.id.substring(0,8)}</span>
+                            <h3 class="text-xs font-black text-emerald-400 uppercase tracking-[0.15em] truncate max-w-[180px]">${item.title}</h3>
+                        </div>
+                        <div class="flex gap-4 opacity-20 group-hover:opacity-100 transition-opacity">
+                            <button onclick="prepareEdit('${item.id}')" class="text-cyan-600 hover:text-emerald-400"><i class="fas fa-sliders"></i></button>
+                            <button onclick="deleteFragment('${item.id}')" class="text-cyan-900 hover:text-red-500"><i class="fas fa-circle-xmark"></i></button>
+                        </div>
+                    </div>
+
+                    <div id="content-${item.id}" class="text-[11px] font-mono text-cyan-200/50 mb-6 flex-grow line-clamp-4 overflow-y-auto max-h-[120px] leading-relaxed">
+                        ${item.content || 'NO_PAYLOAD_DETECTED'}
+                    </div>
+
+                    ${renderPreviewArea(item)}
+
+                    <button onclick="initializeMedia('${item.id}')" class="mt-6 w-full bg-emerald-500/5 hover:bg-emerald-400 hover:text-black py-3 border border-emerald-500/20 text-[9px] font-black uppercase tracking-widest transition-all">
+                        Synchronize Link
+                    </button>
+                </div>
+            `).join('');
+        };
+
+        function renderPreviewArea(item) {
+            if (item.fileType === 'audio' && item.fileUrl) {
+                return `<div class="media-container"><audio class="hidden"><source src="${item.fileUrl}"></audio><div class="h-1 w-full bg-emerald-500/10"></div></div>`;
+            }
+            if (item.fileType === 'link' && item.fileUrl.includes('youtube')) {
+                return `<div class="media-container aspect-video rounded-sm overflow-hidden"><div id="yt-${item.id}" class="w-full h-full bg-black/80"></div></div>`;
+            }
+            return '';
+        }
+
+        window.initializeMedia = (id) => {
+            const item = fragments.find(f => f.id === id);
+            MediaManager.init(item);
+        };
+
+        window.toggleModal = (s) => {
+            document.getElementById('modalOverlay').classList.toggle('hidden', !s);
+            if(!s) {
+                document.getElementById('editId').value = "";
+                document.getElementById('fragmentTitle').value = "";
+                document.getElementById('fragmentContent').value = "";
+                document.getElementById('fileUrl').value = "";
+            }
+        };
+
+        window.prepareEdit = (id) => {
+            const item = fragments.find(f => f.id === id);
+            document.getElementById('editId').value = id;
+            document.getElementById('fragmentTitle').value = item.title;
+            document.getElementById('fileType').value = item.fileType;
+            document.getElementById('fileUrl').value = item.fileUrl || "";
+            document.getElementById('fragmentContent').value = item.content || "";
+            toggleModal(true);
+        };
+
+        window.handleSave = () => {
+            const id = document.getElementById('editId').value;
+            const data = {
+                id: id || crypto.randomUUID(),
+                title: document.getElementById('fragmentTitle').value || "UNTITLED_NODE",
+                fileType: document.getElementById('fileType').value,
+                fileUrl: document.getElementById('fileUrl').value,
+                content: document.getElementById('fragmentContent').value,
+                updatedAt: Date.now()
+            };
+
+            if(id) {
+                const idx = fragments.findIndex(f => f.id === id);
+                fragments[idx] = data;
+            } else {
+                fragments.unshift(data);
+            }
+
+            StorageManager.save(fragments);
+            renderVault();
+            toggleModal(false);
+        };
+
+        window.deleteFragment = (id) => {
+            if(confirm("TERMINATE NODE DATA?")) {
+                fragments = fragments.filter(f => f.id !== id);
+                StorageManager.save(fragments);
+                renderVault();
+            }
+        };
+
+        // --------------------
+        // DATA PORTABILITY
+        // --------------------
+        window.exportData = () => {
+            const blob = new Blob([JSON.stringify(fragments, null, 2)], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `EIDOLON_VAULT_BACKUP_${Date.now()}.json`;
+            a.click();
+            URL.revokeObjectURL(url);
+        };
+
+        window.triggerImport = () => {
+            document.getElementById('importInput').click();
+        };
+
+        window.handleImport = (event) => {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                try {
+                    const importedData = JSON.parse(e.target.result);
+                    if (Array.isArray(importedData)) {
+                        if (confirm(`RESTORE ${importedData.length} NODES? THIS WILL OVERWRITE CURRENT LOCAL CACHE.`)) {
+                            fragments = importedData;
+                            StorageManager.save(fragments);
+                            renderVault();
+                        }
+                    } else { alert("INVALID_SIGNAL: ARCHIVE FORMAT UNRECOGNIZED."); }
+                } catch (err) { alert("DECRYPTION_FAILED: NON-JSON PAYLOAD."); }
+            };
+            reader.readAsText(file);
+            event.target.value = '';
+        };
+
+        window.clearVault = () => {
+            if (confirm("PURGE ENTIRE LOCAL VAULT? THIS CANNOT BE UNDONE WITHOUT A BACKUP.")) {
+                fragments = [];
+                StorageManager.save(fragments);
+                renderVault();
+            }
+        };
+
+        // Setup HUD controls
+        document.getElementById('hudPlayPause').onclick = () => MediaManager.togglePlayPause();
+        document.getElementById('hudStop').onclick = () => MediaManager.stopAll();
+        document.getElementById('hudSeek').oninput = (e) => MediaManager.seek(e.target.value);
+
+        // Run
+        renderVault();
+    </script>
+</body>
+</html>
 
